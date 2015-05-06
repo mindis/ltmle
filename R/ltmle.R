@@ -381,7 +381,7 @@ FixedTimeTMLE <- function(inputs, msm.weights, combined.summary.measures, baseli
   num.betas <- ncol(combined.summary.measures)
   tmle <- rep(NA, num.regimes)
   IC <- matrix(0, nrow=n, ncol=num.betas)
-  cum.g <- cum.g.unbounded <- prob.A.is.1 <- array(0, dim=c(n, length(nodes$AC), num.regimes))
+  cum.g <- cum.g.unbounded <- g.unbounded <- prob.A.is.1 <- array(0, dim=c(n, length(nodes$AC), num.regimes))
   cum.g.meanL <- cum.g.meanL.unbounded <- array(0, dim=c(n, length(nodes$AC), num.regimes, length(nodes$LY)-1))
   fit.g <- vector("list", num.regimes)
   for (i in 1:num.regimes) {
@@ -392,6 +392,7 @@ FixedTimeTMLE <- function(inputs, msm.weights, combined.summary.measures, baseli
       g.list <- EstimateG(inputs, regime.index=i)
       cum.g[, , i] <- g.list$cum.g
       cum.g.unbounded[, , i] <- g.list$cum.g.unbounded
+      g.unbounded[, , i] <- g.list$g.unbounded
       cum.g.meanL[, , i, ] <- g.list$cum.g.meanL
       cum.g.meanL.unbounded[, , i, ] <- g.list$cum.g.meanL.unbounded
       prob.A.is.1[, , i] <- g.list$prob.A.is.1
@@ -412,6 +413,7 @@ FixedTimeTMLE <- function(inputs, msm.weights, combined.summary.measures, baseli
   
   for (LYnode.index in length(nodes$LY):1) {
     cur.node <- nodes$LY[LYnode.index]
+    ACnode.index  <- which.max(nodes$AC[nodes$AC < cur.node])
     deterministic.list.origdata <- IsDeterministic(data, cur.node, inputs$deterministic.Q.function, nodes, called.from.estimate.g=FALSE, inputs$survivalOutcome)
     uncensored <- IsUncensored(data, nodes$C, cur.node)
     intervention.match <- subs <- matrix(nrow=n, ncol=num.regimes)
@@ -446,13 +448,13 @@ FixedTimeTMLE <- function(inputs, msm.weights, combined.summary.measures, baseli
       }
       Qstar.est <- list(fit="no updating at this node because all rows are set deterministically")
     } else {
-      ACnode.index  <- which.max(nodes$AC[nodes$AC < cur.node])
       update.list <- UpdateQ(Qstar.kplus1, logitQ, combined.summary.measures, subs, cum.g[, ACnode.index, ], inputs$working.msm, uncensored, intervention.match, msm.weights, inputs$gcomp, inputs$observation.weights)
-      Qstar <- update.list$Qstar
+      Qstar <- update.list$Qstar      
       Qstar[deterministic.list.newdata$is.deterministic, ] <- deterministic.list.newdata$Q
       curIC <- CalcIC(Qstar.kplus1, Qstar, update.list$h.g.ratio, uncensored, intervention.match, regimes.with.positive.weight)
       curIC.relative.error <- abs(colSums(curIC)) / apply(abs(combined.summary.measures), 2, mean)
       if (any(curIC.relative.error > 0.001) && !inputs$gcomp) {
+        cat("score equation not solved: sum(curIC)= ", colSums(curIC), "\n") #fixme
         fix.score.list <- FixScoreEquation(Qstar.kplus1, update.list$h.g.ratio, uncensored, intervention.match, deterministic.list.newdata, update.list$off, update.list$X, regimes.with.positive.weight)
         Qstar <- fix.score.list$Qstar
         curIC <- CalcIC(Qstar.kplus1, Qstar, update.list$h.g.ratio, uncensored, intervention.match, regimes.with.positive.weight)
@@ -461,6 +463,12 @@ FixedTimeTMLE <- function(inputs, msm.weights, combined.summary.measures, baseli
       est.var <- est.var + EstimateVariance(inputs, combined.summary.measures, regimes.with.positive.weight, uncensored, deterministic.list.newdata, Qstar, Qstar.kplus1, cur.node, msm.weights, LYnode.index, ACnode.index, cum.g, prob.A.is.1, baseline.column.names, cum.g.meanL, cum.g.unbounded, cum.g.meanL.unbounded, inputs$observation.weights, is.last.LYnode=(LYnode.index==length(nodes$LY)))
     }
     IC <- IC + curIC 
+    if (new.mark.idea) {
+      stopifnot(ncol(combined.summary.measures)==1 && i==1 && inputs$IC.variance.only)
+      #Qstar <- Qstar * cum.g.unbounded[, ACnode.index, ] / cum.g[, ACnode.index, ]
+      g.ratio <- g.unbounded[, ACnode.index, ] / Bound(g.unbounded[, ACnode.index, ], c(inputs$gbounds[1]^(1/ncol(g.unbounded)), 1)) #fixme - ugly 
+      Qstar <- Qstar * g.ratio
+    }
     Qstar.kplus1 <- Qstar
     fit.Qstar[[LYnode.index]] <- update.list$fit
   }
@@ -1253,7 +1261,7 @@ EstimateG <- function(inputs, regime.index) {
     cum.g.meanL[, , i] <- CalcCumG(drop3(gmat.meanL[, , i, drop=F]), inputs$gbounds)
     cum.g.meanL.unbounded[, , i] <- CalcCumG(drop3(gmat.meanL[, , i, drop=F]), c(0,1)) 
   }
-  return(list(cum.g=cum.g, cum.g.unbounded=cum.g.unbounded, cum.g.meanL=cum.g.meanL, fit=fit, prob.A.is.1=prob.A.is.1, cum.g.meanL.unbounded=cum.g.meanL.unbounded))
+  return(list(cum.g=cum.g, cum.g.unbounded=cum.g.unbounded, cum.g.meanL=cum.g.meanL, fit=fit, prob.A.is.1=prob.A.is.1, cum.g.meanL.unbounded=cum.g.meanL.unbounded, g.unbounded=gmat))
 }
 
 PredictProbAMeanL <- function(data, nodes, subs, fit, SL.XY) {
@@ -1394,7 +1402,33 @@ glm.ltmle <- function(f, data, family, control, observation.weights) {
 
 # Calculate bounded cumulative G
 CalcCumG <- function(g, gbounds) {
-  cum.g <- AsMatrix(Bound(t(apply(g, 1, cumprod)), gbounds)) #AsMatrix to fix problems where apply returns a vector
+  GetCumG <- function(delta.star) {
+    #bound each column at delta.star
+    g.bounded <- apply(g, 2, Bound, c(delta.star, 1))
+#     not.g <- 1 - g
+#     not.g.bounded <- apply(not.g, 2, Bound, c(delta.star, 1))
+#     g.bounded <- g.bounded / (g.bounded + not.g.bounded)
+    cum.g <- t(apply(g.bounded, 1, cumprod))
+    #ok <- min(cum.g) >= delta
+    return(cum.g)
+  }
+#   f <- function(delta.star) {
+#     cum.g <- GetCumG(delta.star)
+#     penalty <- 1000 * pmax(gbounds[1] - min(cum.g), 0)
+#     obj <- delta.star + penalty
+#     return(obj)
+#   }
+  if (new.mark.idea && !all(is.na(g)) && gbounds[1]>0) {
+    stopifnot(gbounds[2] == 1)
+    #opt <- optimize(f, interval=c(0, 1))
+    #print(opt)
+    #delta.star <- opt$minimum
+    delta.star <- gbounds[1]^(1/ncol(g))
+    cum.g <- AsMatrix(GetCumG(delta.star))
+    stopifnot(min(cum.g) > (gbounds[1] - 1e-4))
+  } else {
+    cum.g <- AsMatrix(Bound(t(apply(g, 1, cumprod)), gbounds)) #AsMatrix to fix problems where apply returns a vector
+  }
   return(cum.g)
 }
 
