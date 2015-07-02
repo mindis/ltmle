@@ -665,6 +665,7 @@ CalcGUnboundedToBoundedRatio <- function(inputs, cum.g, cum.g.meanL, cum.g.unbou
     index <- max.col(!is.na(g.ratio.temp), "last")
     g.ratio[, i] <- g.ratio.temp[sub2ind(1:n, col = index, num.rows = n)]
   }
+  if (any(is.na(g.ratio))) stop("NA in g.ratio")
   return(g.ratio)
 }
 
@@ -1218,10 +1219,19 @@ EstimateG <- function(inputs, regime.index) {
   uncensored <- rep(TRUE, nrow(inputs$data))
   fit <- vector("list", length(inputs$nodes$AC))
   names(fit) <- names(inputs$data)[inputs$nodes$AC]
+  if (!inputs$IC.variance.only) { 
+    abar.meanL <- abar
+    for (i in sseq(1, length(inputs$nodes$A))) {
+      if (any(is.na(abar.meanL[, i]))) { #abar.meanL needs to be nonNA
+        abar.meanL[is.na(abar.meanL[, i]), i] <- Mode(abar.meanL[, i], na.rm = TRUE)
+      }
+    }
+  }
   for (i in 1:length(inputs$nodes$AC)) {
     cur.node <- inputs$nodes$AC[i]
     uncensored <- IsUncensored(inputs$data, inputs$nodes$C, cur.node)
     newdata <- SetA(inputs$data, abar, inputs$nodes, cur.node)
+    if (!inputs$IC.variance.only) newdata.meanL <- SetA(inputs$data, abar.meanL, inputs$nodes, cur.node)
     deterministic.origdata <- IsDeterministic(inputs$data, cur.node, inputs$deterministic.Q.function, inputs$nodes, called.from.estimate.g=TRUE, inputs$survivalOutcome)$is.deterministic #deterministic due to death or Q.function
     deterministic.newdata <- IsDeterministic(newdata, cur.node, inputs$deterministic.Q.function, inputs$nodes, called.from.estimate.g=TRUE, inputs$survivalOutcome)$is.deterministic #deterministic due to death or Q.function - using data modified so A = abar
     if (is.numeric(inputs$gform)) {
@@ -1251,7 +1261,7 @@ EstimateG <- function(inputs, regime.index) {
           if (!inputs$IC.variance.only) {           
             #n x numACnodes x (numLYnodes - 1)
             #[,,k] is prob.A.is.1 with all L and Y nodes after and including LYnodes[k] set to mean of L (na.rm=T)
-            prob.A.is.1.meanL[, i, ] <- PredictProbAMeanL(newdata, inputs$nodes, subs, g.est$fit, SL.XY=g.est$SL.XY)
+            prob.A.is.1.meanL[, i, ] <- PredictProbAMeanL(newdata.meanL, inputs$nodes, subs, g.est$fit, SL.XY=g.est$SL.XY)
           }
         } else {
           msg <- paste0("ltmle failed trying to estimate ", inputs$gform[i], " because there are no observations that are\nuncensored", ifelse(inputs$stratify, ", follow abar,", ""), " and are not set deterministically due to death or deterministic.g.function or deterministic.Q.function\n")
@@ -1264,19 +1274,22 @@ EstimateG <- function(inputs, regime.index) {
     #cur.abar can be NA after censoring/death if treatment is dynamic
     if (cur.node %in% inputs$nodes$A) {
       cur.abar <- abar[, inputs$nodes$A == cur.node]
+      if (!inputs$IC.variance.only) cur.abar.meanL <- abar.meanL[, inputs$nodes$A == cur.node]
     } else {
-      cur.abar <- rep(1, nrow(inputs$data))  #if this is a cnode, abar is always 1 (uncensored)
+      cur.abar <- cur.abar.meanL <- rep(1, nrow(inputs$data))  #if this is a cnode, abar is always 1 (uncensored)
     }
     gmat[, i] <- CalcGVec(prob.A.is.1[, i], cur.abar, deterministic.newdata)
-    gmat.meanL[, i, ] <- apply(AsMatrix(prob.A.is.1.meanL[, i, ]), 2, CalcGVec, cur.abar, deterministic.newdata)
+    if (!inputs$IC.variance.only) gmat.meanL[, i, ] <- apply(AsMatrix(prob.A.is.1.meanL[, i, ]), 2, CalcGVec, cur.abar.meanL, deterministic.newdata)
     if (any(is.na(gmat[uncensored, i]))) stop("Error - NA in g. g should only be NA after censoring. If you passed numeric gform, make sure there are no NA values except after censoring. Otherwise something has gone wrong.")
     fit[[i]] <- g.est$fit
   }
   cum.g.unbounded <- CalcCumG(gmat, c(0, 1))
   cum.g <- CalcCumG(gmat, inputs$gbounds)
-  for (i in sseq(1, dim(gmat.meanL)[3])) {
-    cum.g.meanL[, , i] <- CalcCumG(drop3(gmat.meanL[, , i, drop=F]), inputs$gbounds)
-    cum.g.meanL.unbounded[, , i] <- CalcCumG(drop3(gmat.meanL[, , i, drop=F]), c(0,1)) 
+  if (!inputs$IC.variance.only) {
+    for (i in sseq(1, dim(gmat.meanL)[3])) {
+      cum.g.meanL[, , i] <- CalcCumG(drop3(gmat.meanL[, , i, drop=F]), inputs$gbounds)
+      cum.g.meanL.unbounded[, , i] <- CalcCumG(drop3(gmat.meanL[, , i, drop=F]), c(0,1)) 
+    }
   }
   return(list(cum.g=cum.g, cum.g.unbounded=cum.g.unbounded, cum.g.meanL=cum.g.meanL, fit=fit, prob.A.is.1=prob.A.is.1, cum.g.meanL.unbounded=cum.g.meanL.unbounded))
 }
@@ -1315,6 +1328,7 @@ PredictProbAMeanL <- function(data, nodes, subs, fit, SL.XY) {
       }, "prediction from a rank-deficient fit may be misleading")
     }
   }
+  if (any(is.na(probAis1.meanL[, 1]))) stop("NA in probAis1.meanL[, 1]")
   return(probAis1.meanL)
 }
 
