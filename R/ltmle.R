@@ -427,7 +427,15 @@ FixedTimeTMLE <- function(inputs, msm.weights, combined.summary.measures, baseli
       newdata <- SetA(data, abar=abar, nodes, cur.node)
       deterministic.list.newdata <- IsDeterministic(newdata, cur.node, inputs$deterministic.Q.function, nodes, called.from.estimate.g=FALSE, inputs$survivalOutcome)
       if (inputs$stratify) {
-        subs[, i] <- uncensored & intervention.match[, i] & !deterministic.list.origdata$is.deterministic
+        if (pooling1) {
+          #only check that most recent A matches d
+          stopifnot(is.null(nodes$C))
+          Anode.index  <- which.max(nodes$A[nodes$A < cur.node])
+          int.match <- data[, nodes$A[Anode.index]] == abar[, Anode.index]
+        } else {
+          int.match <- intervention.match[, i]         
+        }
+        subs[, i] <- uncensored & int.match & !deterministic.list.origdata$is.deterministic
       } else {
         subs[, i] <- uncensored & !deterministic.list.origdata$is.deterministic
       }
@@ -469,6 +477,7 @@ FixedTimeTMLE <- function(inputs, msm.weights, combined.summary.measures, baseli
     IC <- IC + curIC 
     Qstar.kplus1 <- Qstar
     fit.Qstar[[LYnode.index]] <- update.list$fit
+    #browser()
   }
   g.ratio <- CalcGUnboundedToBoundedRatio(inputs, cum.g, cum.g.meanL, cum.g.unbounded, cum.g.meanL.unbounded)
   #tmle <- colMeans(Qstar)
@@ -1572,11 +1581,18 @@ CalcIC <- function(Qstar.kplus1, Qstar, h.g.ratio, uncensored, intervention.matc
 
 #Set the Anodes of d to abar and Cnodes to uncensored (up to and including cur.node - cur.node itself is included for consistency checking in DeterministicG)
 SetA <- function(data, abar, nodes, cur.node) {
-  Anode.index <- nodes$A <= cur.node
-  data[, nodes$A[Anode.index]] <- abar[, Anode.index]
-  
-  Cnode.index <- nodes$C <= cur.node
-  data[, nodes$C[Cnode.index]] <- factor(rep("uncensored", nrow(data))) #recycled
+  if (pooling1) {
+    Anode.index <- nodes$A <= cur.node
+    Anode.index <- max(which(Anode.index))
+    data[, nodes$A[Anode.index]] <- abar[, Anode.index]
+    stopifnot(is.null(nodes$C))
+  } else {
+    Anode.index <- nodes$A <= cur.node
+    data[, nodes$A[Anode.index]] <- abar[, Anode.index]
+    
+    Cnode.index <- nodes$C <= cur.node
+    data[, nodes$C[Cnode.index]] <- factor(rep("uncensored", nrow(data))) #recycled
+  }
   return(data)
 }
 
