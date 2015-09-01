@@ -454,7 +454,7 @@ FixedTimeTMLE <- function(inputs, msm.weights, combined.summary.measures, baseli
       curIC <- CalcIC(Qstar.kplus1, Qstar, update.list$h.g.ratio, uncensored, intervention.match, regimes.with.positive.weight)
       curIC.relative.error <- abs(colSums(curIC)) / apply(abs(combined.summary.measures), 2, mean)
       if (any(curIC.relative.error > 0.001) && !inputs$gcomp) {
-        cat("score equation not solved: sum(curIC)= ", colSums(curIC), "\n") #fixme
+        #cat("score equation not solved: sum(curIC)= ", colSums(curIC), "\n")
         fix.score.list <- FixScoreEquation(Qstar.kplus1, update.list$h.g.ratio, uncensored, intervention.match, deterministic.list.newdata, update.list$off, update.list$X, regimes.with.positive.weight)
         Qstar <- fix.score.list$Qstar
         curIC <- CalcIC(Qstar.kplus1, Qstar, update.list$h.g.ratio, uncensored, intervention.match, regimes.with.positive.weight)
@@ -463,16 +463,20 @@ FixedTimeTMLE <- function(inputs, msm.weights, combined.summary.measures, baseli
       est.var <- est.var + EstimateVariance(inputs, combined.summary.measures, regimes.with.positive.weight, uncensored, deterministic.list.newdata, Qstar, Qstar.kplus1, cur.node, msm.weights, LYnode.index, ACnode.index, cum.g, prob.A.is.1, baseline.column.names, cum.g.meanL, cum.g.unbounded, cum.g.meanL.unbounded, inputs$observation.weights, is.last.LYnode=(LYnode.index==length(nodes$LY)))
     }
     IC <- IC + curIC 
-    if (new.mark.idea) {
-      stopifnot(ncol(combined.summary.measures)==1 && i==1 && inputs$IC.variance.only)
+    if (truncated.tmle) {
+      #stopifnot(ncol(combined.summary.measures)==1 && i==1 && inputs$IC.variance.only)
       #Qstar <- Qstar * cum.g.unbounded[, ACnode.index, ] / cum.g[, ACnode.index, ]
-      g.ratio <- g.unbounded[, ACnode.index, ] / Bound(g.unbounded[, ACnode.index, ], c(inputs$gbounds[1]^(1/ncol(g.unbounded)), 1)) #fixme - ugly 
-      Qstar <- Qstar * g.ratio
+      g.ratio1 <- g.unbounded[, ACnode.index, ] / Bound(g.unbounded[, ACnode.index, ], c(inputs$gbounds[1]^(1/ncol(g.unbounded)), 1)) #fixme - ugly 
+      Qstar <- Qstar * g.ratio1
     }
     Qstar.kplus1 <- Qstar
     fit.Qstar[[LYnode.index]] <- update.list$fit
   }
-  g.ratio <- CalcGUnboundedToBoundedRatio(inputs, cum.g, cum.g.meanL, cum.g.unbounded, cum.g.meanL.unbounded)
+  if (truncated.tmle) {
+    g.ratio <- 1 #don't use g.ratio in NormalizeIC
+  } else {
+    g.ratio <- CalcGUnboundedToBoundedRatio(inputs, cum.g, cum.g.meanL, cum.g.unbounded, cum.g.meanL.unbounded)
+  }
   #tmle <- colMeans(Qstar)
   return(list(IC=IC, Qstar=Qstar, cum.g=cum.g, cum.g.unbounded=cum.g.unbounded, g.ratio=g.ratio, est.var=est.var, fit=list(g=fit.g, Q=fit.Q, Qstar=fit.Qstar))) 
 }
@@ -963,7 +967,12 @@ summary.ltmle <- function(object, estimator=ifelse(object$gcomp, "gcomp", "tmle"
   }
   variance.estimate.ratio=v/IC.variance
   
-  treatment <- GetSummary(list(long.name=NULL, est=object$estimates[estimator], gradient=1, log.std.err=FALSE, CIBounds=c(0, 1)), v, n=length(object$IC[[estimator]]))
+  if (object$transformOutcome) {
+    CIBounds <- c(-Inf, Inf)  #could truncate at Yrange, but it's not clear that's right
+  } else {
+    CIBounds <- c(0, 1)
+  }
+  treatment <- GetSummary(list(long.name=NULL, est=object$estimates[estimator], gradient=1, log.std.err=FALSE, CIBounds=CIBounds), v, n=length(object$IC[[estimator]]))
   ans <- list(treatment=treatment, call=object$call, estimator=estimator, variance.estimate.ratio=variance.estimate.ratio)
   class(ans) <- "summary.ltmle"
   return(ans)
@@ -1418,7 +1427,7 @@ CalcCumG <- function(g, gbounds) {
 #     obj <- delta.star + penalty
 #     return(obj)
 #   }
-  if (new.mark.idea && !all(is.na(g)) && gbounds[1]>0) {
+  if (truncated.tmle && !all(is.na(g)) && gbounds[1]>0) {
     stopifnot(gbounds[2] == 1)
     #opt <- optimize(f, interval=c(0, 1))
     #print(opt)
